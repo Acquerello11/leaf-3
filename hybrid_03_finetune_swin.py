@@ -43,7 +43,7 @@ class SupConLoss(nn.Module):
         return loss.mean()
 
 class SwinVisionFinetuner(nn.Module):
-    def __init__(self, model_name='swin_large_patch4_window7_224'):
+    def __init__(self, model_name='swinv2_large_window12to16_192to256'):
         super().__init__()
         # ใช้ timm โหลด Swin Transformer แบบดึงเฉพาะ Feature (num_classes=0)
         self.encoder = timm.create_model(model_name, pretrained=True, num_classes=0)
@@ -79,29 +79,31 @@ def evaluate_knn(model, train_loader, val_loader, device):
     train_features = []
     train_labels = []
     with torch.inference_mode():
-        for inputs, labels in train_loader:
+        for inputs, labels in tqdm(train_loader, desc="   [k-NN] Building KB", leave=False):
             inputs = inputs.to(device)
-            features = model.get_features(inputs)
+            with torch.amp.autocast('cuda'):
+                features = model.get_features(inputs)
             features = F.normalize(features, dim=1)
             train_features.append(features.cpu())
             train_labels.append(labels)
             
-    train_features = torch.cat(train_features, dim=0)
-    train_labels = torch.cat(train_labels, dim=0)
+    train_features = torch.cat(train_features, dim=0).to(device)
+    train_labels = torch.cat(train_labels, dim=0).to(device)
     
     # 2. ทดสอบกับ Val
     correct = 0
     total = 0
     with torch.inference_mode():
-        for inputs, labels in val_loader:
-            inputs = inputs.to(device)
-            val_features = model.get_features(inputs)
+        for inputs, labels in tqdm(val_loader, desc="   [k-NN] Evaluating", leave=False):
+            inputs, labels = inputs.to(device), labels.to(device)
+            with torch.amp.autocast('cuda'):
+                val_features = model.get_features(inputs)
             val_features = F.normalize(val_features, dim=1)
             
-            # Dot Product หาระยะห่าง Cosine Similarity
+            # Dot Product หาระยะห่าง Cosine Similarity บน GPU (เร็วมาก)
             sim_matrix = torch.matmul(val_features, train_features.T)
             best_match_indices = torch.argmax(sim_matrix, dim=1)
-            preds = train_labels[best_match_indices.cpu()]
+            preds = train_labels[best_match_indices]
             
             correct += (preds == labels).sum().item()
             total += labels.size(0)
@@ -114,9 +116,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"รันบนอุปกรณ์: {device}")
     
-    # Transform สำหรับตอนเทรนปกติ
+    # Transform สำหรับตอนเทรนปกติ (SwinV2 ตัวนี้รับภาพขนาด 256x256 ได้ดีที่สุด)
     train_transform = transforms.Compose([
-        transforms.Resize((224, 224)), 
+        transforms.Resize((256, 256)), 
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
         transforms.RandomRotation(30), 
@@ -126,7 +128,7 @@ def main():
     
     # Transform สำหรับตอนทำข้อสอบย่อย k-NN (ห้ามบิดรูป)
     val_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])

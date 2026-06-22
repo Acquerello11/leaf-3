@@ -80,29 +80,31 @@ def evaluate_knn(model, train_loader, val_loader, device):
     train_features = []
     train_labels = []
     with torch.inference_mode():
-        for inputs, labels in train_loader:
+        for inputs, labels in tqdm(train_loader, desc="   [k-NN] Building KB", leave=False):
             inputs = inputs.to(device)
-            features = model.get_features(inputs)
+            with torch.amp.autocast('cuda'):
+                features = model.get_features(inputs)
             features = F.normalize(features, dim=1)
             train_features.append(features.cpu())
             train_labels.append(labels)
             
-    train_features = torch.cat(train_features, dim=0)
-    train_labels = torch.cat(train_labels, dim=0)
+    train_features = torch.cat(train_features, dim=0).to(device)
+    train_labels = torch.cat(train_labels, dim=0).to(device)
     
     # 2. ทดสอบกับ Val
     correct = 0
     total = 0
     with torch.inference_mode():
-        for inputs, labels in val_loader:
-            inputs = inputs.to(device)
-            val_features = model.get_features(inputs)
+        for inputs, labels in tqdm(val_loader, desc="   [k-NN] Evaluating", leave=False):
+            inputs, labels = inputs.to(device), labels.to(device)
+            with torch.amp.autocast('cuda'):
+                val_features = model.get_features(inputs)
             val_features = F.normalize(val_features, dim=1)
             
-            # Dot Product หาระยะห่าง Cosine Similarity
+            # Dot Product หาระยะห่าง Cosine Similarity บน GPU (เร็วมาก)
             sim_matrix = torch.matmul(val_features, train_features.T)
             best_match_indices = torch.argmax(sim_matrix, dim=1)
-            preds = train_labels[best_match_indices.cpu()]
+            preds = train_labels[best_match_indices]
             
             correct += (preds == labels).sum().item()
             total += labels.size(0)
@@ -132,8 +134,8 @@ def main():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    train_dir = "Data200_Hybrid_Split/train"
-    val_dir = "Data200_Hybrid_Split/val"
+    train_dir = "Data200_Raw_Split/train"
+    val_dir = "Data200_Raw_Split/val"
     if not os.path.exists(train_dir) or not os.path.exists(val_dir):
         print(f"❌ ไม่พบโฟลเดอร์ข้อมูล {train_dir} หรือ {val_dir} กรุณารันไฟล์ 02 ก่อน")
         return

@@ -23,12 +23,13 @@ def build_knowledge_base(model, loader, device):
     with torch.inference_mode():
         for inputs, labels in tqdm(loader, desc="Building KB"):
             inputs = inputs.to(device)
-            features = model.get_features(inputs)
+            with torch.amp.autocast('cuda'):
+                features = model.get_features(inputs)
             features = F.normalize(features, dim=1)
             features_list.append(features.cpu())
             labels_list.append(labels)
             
-    return torch.cat(features_list, dim=0), torch.cat(labels_list, dim=0)
+    return torch.cat(features_list, dim=0).to(device), torch.cat(labels_list, dim=0).to(device)
 
 def evaluate_model(model, val_loader, train_features, train_labels, device):
     """ทำข้อสอบและวัดผล"""
@@ -36,9 +37,10 @@ def evaluate_model(model, val_loader, train_features, train_labels, device):
     total = 0
     with torch.inference_mode():
         for inputs, labels in tqdm(val_loader, desc="Evaluating"):
-            inputs = inputs.to(device)
-            val_features = model.get_features(inputs)
-            val_features = F.normalize(val_features, dim=1).cpu()
+            inputs, labels = inputs.to(device), labels.to(device)
+            with torch.amp.autocast('cuda'):
+                val_features = model.get_features(inputs)
+            val_features = F.normalize(val_features, dim=1)
             
             sim_matrix = torch.matmul(val_features, train_features.T)
             best_match_indices = torch.argmax(sim_matrix, dim=1)
@@ -81,24 +83,33 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"รันบนอุปกรณ์: {device}\n")
     
-    transform = transforms.Compose([
+    transform_dino = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     
-    train_dir = "Data200_Hybrid_Split/train"
-    val_dir = "Data200_Hybrid_Split/val"
+    transform_swin = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    
+    train_dir = "Data200_Raw_Split/train"
+    val_dir = "Data200_Raw_Split/val"
     if not os.path.exists(train_dir) or not os.path.exists(val_dir):
-        print(f"❌ ไม่พบข้อมูล {train_dir}")
+        print(f"❌ ไม่พบข้อมูล {train_dir} หรือให้ลองแก้เป็น Data200_Hybrid_Split")
         return
 
-    eval_train_dataset = datasets.ImageFolder(train_dir, transform=transform)
-    val_dataset = datasets.ImageFolder(val_dir, transform=transform)
+    eval_train_dataset_dino = datasets.ImageFolder(train_dir, transform=transform_dino)
+    val_dataset_dino = datasets.ImageFolder(val_dir, transform=transform_dino)
+    eval_train_loader_dino = DataLoader(eval_train_dataset_dino, batch_size=128, shuffle=False, num_workers=8)
+    val_loader_dino = DataLoader(val_dataset_dino, batch_size=128, shuffle=False, num_workers=8)
     
-    # DataLoader
-    eval_train_loader = DataLoader(eval_train_dataset, batch_size=64, shuffle=False, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4)
+    eval_train_dataset_swin = datasets.ImageFolder(train_dir, transform=transform_swin)
+    val_dataset_swin = datasets.ImageFolder(val_dir, transform=transform_swin)
+    eval_train_loader_swin = DataLoader(eval_train_dataset_swin, batch_size=128, shuffle=False, num_workers=8)
+    val_loader_swin = DataLoader(val_dataset_swin, batch_size=128, shuffle=False, num_workers=8)
     
     results = {}
     
@@ -115,8 +126,8 @@ def main():
             print("   ⚠️ ไม่พบน้ำหนักที่เทรน (กำลังใช้ Pre-trained ดั้งเดิม)")
             
         model_dino.eval()
-        dino_train_feat, dino_train_labels = build_knowledge_base(model_dino, eval_train_loader, device)
-        dino_acc = evaluate_model(model_dino, val_loader, dino_train_feat, dino_train_labels, device)
+        dino_train_feat, dino_train_labels = build_knowledge_base(model_dino, eval_train_loader_dino, device)
+        dino_acc = evaluate_model(model_dino, val_loader_dino, dino_train_feat, dino_train_labels, device)
         results["DINOv2"] = dino_acc
         print(f"   🏆 ความแม่นยำ DINOv2: {dino_acc:.2f}%\n")
     except Exception as e:
@@ -135,8 +146,8 @@ def main():
             print("   ⚠️ ไม่พบน้ำหนักที่เทรน (กำลังใช้ Pre-trained ดั้งเดิม)")
             
         model_swin.eval()
-        swin_train_feat, swin_train_labels = build_knowledge_base(model_swin, eval_train_loader, device)
-        swin_acc = evaluate_model(model_swin, val_loader, swin_train_feat, swin_train_labels, device)
+        swin_train_feat, swin_train_labels = build_knowledge_base(model_swin, eval_train_loader_swin, device)
+        swin_acc = evaluate_model(model_swin, val_loader_swin, swin_train_feat, swin_train_labels, device)
         results["Swin Transformer"] = swin_acc
         print(f"   🏆 ความแม่นยำ Swin Transformer: {swin_acc:.2f}%\n")
     except Exception as e:
@@ -157,21 +168,24 @@ def main():
     if 'model_dino' in locals() and 'model_swin' in locals():
         print("\n🔍 กำลังสร้างแผนผังโฟกัส (Attention Map) เปรียบเทียบ 2 โมเดล...")
         # สุ่มรูป 1 รูปจาก Validation
-        val_samples = val_dataset.samples
+        val_samples = val_dataset_dino.samples
         random_path, _ = random.choice(val_samples)
         
         img_pil = Image.open(random_path).convert("RGB")
-        img_resized = img_pil.resize((224, 224))
-        img_np = np.array(img_resized)
+        img_np_dino = np.array(img_pil.resize((224, 224)))
+        img_np_swin = np.array(img_pil.resize((256, 256)))
         
-        img_tensor = transform(img_pil).unsqueeze(0)
+        img_tensor_dino = transform_dino(img_pil).unsqueeze(0)
+        img_tensor_swin = transform_swin(img_pil).unsqueeze(0)
         
         try:
-            dino_hm = generate_dino_heatmap(model_dino, img_tensor, device)
-            dino_overlay = create_heatmap_overlay(img_np, dino_hm)
+            dino_hm = generate_dino_heatmap(model_dino, img_tensor_dino, device)
+            dino_overlay = create_heatmap_overlay(img_np_dino, dino_hm)
             
-            swin_hm = generate_swin_heatmap(model_swin, img_tensor, device)
-            swin_overlay = create_heatmap_overlay(img_np, swin_hm)
+            swin_hm = generate_swin_heatmap(model_swin, img_tensor_swin, device)
+            # Resize swin_hm กลับมาที่ 224 เพื่อประกอบรูปให้เท่ากัน
+            swin_hm_224 = cv2.resize(swin_hm, (224, 224))
+            swin_overlay = create_heatmap_overlay(img_np_dino, swin_hm_224)
             
             # วาดแบนเนอร์
             def add_banner(img, text):
@@ -181,8 +195,8 @@ def main():
                 return np.vstack([img, banner])
                 
             dino_final = add_banner(dino_overlay, "DINOv2 Focus")
-            swin_final = add_banner(swin_overlay, "Swin Focus")
-            original_final = add_banner(img_np, "Original")
+            swin_final = add_banner(swin_overlay, "SwinV2 Focus")
+            original_final = add_banner(img_np_dino, "Original")
             
             comparison_img = np.hstack([original_final, dino_final, swin_final])
             save_path = "compare_attention_maps.png"

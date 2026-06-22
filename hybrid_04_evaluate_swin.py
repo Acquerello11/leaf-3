@@ -11,24 +11,29 @@ from sklearn.metrics import confusion_matrix, classification_report
 import pandas as pd
 import importlib.util
 
-# โหลดคลาส HFVisionFinetuner แบบไดนามิก
-spec = importlib.util.spec_from_file_location("hybrid3", "hybrid_03_finetune_dino.py")
-hybrid3 = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(hybrid3)
-HFVisionFinetuner = hybrid3.HFVisionFinetuner
+# โหลดคลาส SwinVisionFinetuner แบบไดนามิก
+spec = importlib.util.spec_from_file_location("hybrid3_swin", "hybrid_03_finetune_swin.py")
+hybrid3_swin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hybrid3_swin)
+SwinVisionFinetuner = hybrid3_swin.SwinVisionFinetuner
 
-class HybridEvaluator:
+class HybridEvaluatorSwin:
     def __init__(self, weights_path):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[Hybrid Evaluator] ทำงานบนอุปกรณ์: {self.device}")
         
-        print("📥 กำลังโหลดน้ำหนักโมเดล SOTA (HuggingFace) ที่ผ่านการเทรนมาแล้ว...")
-        self.model = HFVisionFinetuner().to(self.device)
-        self.model.encoder.load_state_dict(torch.load(weights_path, map_location=self.device))
+        print("📥 กำลังโหลดน้ำหนักโมเดล Swin Transformer (V2) ที่ผ่านการเทรนมาแล้ว...")
+        self.model = SwinVisionFinetuner().to(self.device)
+        if os.path.exists(weights_path):
+            self.model.encoder.load_state_dict(torch.load(weights_path, map_location=self.device))
+            print("✅ โหลดน้ำหนักสำเร็จ")
+        else:
+            print("⚠️ ไม่พบน้ำหนักที่เทรน (กำลังใช้ Pre-trained ดั้งเดิม)")
         self.model.eval()
         
+        # SwinV2 ใช้ภาพ 256x256
         self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((256, 256)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
@@ -42,7 +47,8 @@ class HybridEvaluator:
         dataset = datasets.ImageFolder(train_dir, transform=self.transform)
         self.classes = dataset.classes
         
-        dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4)
+        # เพิ่ม batch_size และ num_workers ให้เร็วขึ้น
+        dataloader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=8)
         
         all_features = []
         all_labels = []
@@ -50,20 +56,21 @@ class HybridEvaluator:
         with torch.inference_mode():
             for inputs, labels in tqdm(dataloader, desc="สร้างคลังสมอง (Knowledge Base)"):
                 inputs = inputs.to(self.device)
-                features = self.model.get_features(inputs)
+                with torch.amp.autocast('cuda'):
+                    features = self.model.get_features(inputs)
                 features = F.normalize(features, dim=1) 
                 
                 all_features.append(features.cpu())
                 all_labels.append(labels)
                 
-        self.kb_features = torch.cat(all_features, dim=0)
-        self.kb_labels = torch.cat(all_labels, dim=0)
+        self.kb_features = torch.cat(all_features, dim=0).to(self.device)
+        self.kb_labels = torch.cat(all_labels, dim=0).to(self.device)
         print("✅ สร้างคลังสมองสำเร็จ พร้อมสำหรับการทำนาย!")
 
     def evaluate(self, test_dir):
         print("\n🔍 กำลังรันโมเดลทำนายผล (Evaluation) บนข้อมูล Test 15%...")
         dataset = datasets.ImageFolder(test_dir, transform=self.transform)
-        dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4)
+        dataloader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=8)
         
         true_labels = []
         predicted_labels = []
@@ -72,15 +79,17 @@ class HybridEvaluator:
             for inputs, labels in tqdm(dataloader, desc="ประเมินผล Test Set"):
                 inputs = inputs.to(self.device)
                 
-                test_features = self.model.get_features(inputs)
+                with torch.amp.autocast('cuda'):
+                    test_features = self.model.get_features(inputs)
                 test_features = F.normalize(test_features, dim=1)
                 
+                # คิดเลขบน GPU เร็วมาก
                 similarity_matrix = torch.matmul(test_features, self.kb_features.T)
                 best_match_indices = torch.argmax(similarity_matrix, dim=1)
-                pred_labels = self.kb_labels[best_match_indices.cpu()]
+                pred_labels = self.kb_labels[best_match_indices]
                 
                 true_labels.extend(labels.numpy())
-                predicted_labels.extend(pred_labels.numpy())
+                predicted_labels.extend(pred_labels.cpu().numpy())
                 
         true_names = [self.classes[i] for i in true_labels]
         pred_names = [self.classes[i] for i in predicted_labels]
@@ -88,17 +97,17 @@ class HybridEvaluator:
         return true_names, pred_names
 
 def main():
-    print("🌟 เข้าสู่โหมดประเมินประสิทธิภาพระบบ (System Evaluation - HF Engine) 🌟")
+    print("🌟 เข้าสู่โหมดประเมินประสิทธิภาพระบบ (System Evaluation - SwinV2 Engine) 🌟")
     
     train_dir = "Data200_Raw_Split/train"
     test_dir = "Data200_Raw_Split/test"
-    weights_path = "hybrid_hf_vision_finetuned.pth"
+    weights_path = "hybrid_swin_vision_finetuned.pth"
     
-    if not os.path.exists(weights_path) or not os.path.exists(train_dir) or not os.path.exists(test_dir):
-        print(f"❌ ไม่พบไฟล์ที่จำเป็น กรุณาตรวจสอบให้แน่ใจว่ารันโค้ด hybrid ไฟล์ 2 และ 3 ครบถ้วนแล้ว")
+    if not os.path.exists(train_dir) or not os.path.exists(test_dir):
+        print(f"❌ ไม่พบไฟล์ที่จำเป็น กรุณาตรวจสอบว่ามีโฟลเดอร์ {train_dir} และ {test_dir} หรือไม่")
         return
         
-    evaluator = HybridEvaluator(weights_path)
+    evaluator = HybridEvaluatorSwin(weights_path)
     evaluator.build_knowledge_base(train_dir)
     true_labels, predicted_labels = evaluator.evaluate(test_dir)
     
@@ -113,22 +122,23 @@ def main():
     
     report_dict = classification_report(true_labels, predicted_labels, target_names=evaluator.classes, output_dict=True)
     df_report = pd.DataFrame(report_dict).transpose()
-    csv_path = 'hybrid_hf_evaluation_report.csv'
+    csv_path = 'hybrid_swin_evaluation_report.csv'
     df_report.to_csv(csv_path)
     print(f"✅ บันทึกรายงานสถิติลงไฟล์ {csv_path} เรียบร้อยแล้ว")
     
     print("\nกำลังสร้างกราฟ Confusion Matrix...")
+    # Map back to integer indices for confusion matrix
     cm = confusion_matrix(true_labels, predicted_labels, labels=evaluator.classes)
     
     plt.figure(figsize=(20, 16))
-    sns.heatmap(cm, annot=False, cmap='Blues', xticklabels=evaluator.classes, yticklabels=evaluator.classes)
-    plt.title('Confusion Matrix - SOTA Foundation Model (HF Engine)')
+    sns.heatmap(cm, annot=False, cmap='Oranges', xticklabels=evaluator.classes, yticklabels=evaluator.classes)
+    plt.title('Confusion Matrix - SwinV2 Transformer Engine')
     plt.xlabel('Predicted Species')
     plt.ylabel('True Species')
     plt.xticks(rotation=90)
     plt.tight_layout()
     
-    img_path = 'hybrid_hf_confusion_matrix_result.png'
+    img_path = 'hybrid_swin_confusion_matrix_result.png'
     plt.savefig(img_path)
     print(f"✅ บันทึกกราฟลงไฟล์ '{img_path}' เรียบร้อยแล้ว!")
 
