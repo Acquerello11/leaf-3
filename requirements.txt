@@ -1,0 +1,20 @@
+# บังคับใช้ PyTorch 2.4 ขึ้นไป เพื่อให้รองรับ Python 3.12 แบบสมบูรณ์ 100%
+torch>=2.4.0
+torchvision>=0.19.0
+torchaudio>=2.4.0
+numpy
+Pillow
+scikit-learn
+matplotlib
+gradio
+timm
+opencv-python
+grad-cam
+imagehash
+cleanlab
+transformers
+huggingface_hub
+rembg[gpu]
+pandas
+seaborn
+tqdm
