@@ -9,10 +9,10 @@ from tqdm import tqdm
 import torch.backends.cudnn as cudnn
 
 try:
-    from transformers import AutoModel
+    import timm
 except ImportError:
-    print("❌ ไม่พบไลบรารี transformers")
-    print("กรุณาติดตั้งโดยรันคำสั่ง: pip install transformers huggingface_hub")
+    print("❌ ไม่พบไลบรารี timm")
+    print("กรุณาติดตั้งโดยรันคำสั่ง: pip install timm")
     exit(1)
 
 cudnn.benchmark = True
@@ -42,35 +42,34 @@ class SupConLoss(nn.Module):
         loss = -mean_log_prob_pos
         return loss.mean()
 
-class HFVisionFinetuner(nn.Module):
-    def __init__(self, model_name='facebook/dinov2-large'):
+class SwinVisionFinetuner(nn.Module):
+    def __init__(self, model_name='swin_large_patch4_window7_224'):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(model_name)
+        # ใช้ timm โหลด Swin Transformer แบบดึงเฉพาะ Feature (num_classes=0)
+        self.encoder = timm.create_model(model_name, pretrained=True, num_classes=0)
         
         # แช่แข็งพารามิเตอร์เกือบทั้งหมด
         for param in self.encoder.parameters():
             param.requires_grad = False
             
-        # ปลดล็อกเฉพาะ 2 Layer สุดท้ายของ Encoder
-        for param in self.encoder.encoder.layer[-2:].parameters():
-            param.requires_grad = True
-        self.encoder.layernorm.requires_grad = True
+        # ปลดล็อกเฉพาะ 2 Blocks สุดท้ายของ Swin
+        if hasattr(self.encoder, 'layers'):
+            for param in self.encoder.layers[-1].blocks[-2:].parameters():
+                param.requires_grad = True
         
-        # Projection Head
+        # Swin Large จะให้ output ขนาด 1536
         self.head = nn.Sequential(
-            nn.Linear(1024, 512),
+            nn.Linear(1536, 512),
             nn.ReLU(),
             nn.Linear(512, 128)
         )
         
     def forward(self, x):
-        outputs = self.encoder(pixel_values=x)
-        features = outputs.pooler_output 
+        features = self.encoder(x)
         return self.head(features)
 
     def get_features(self, x):
-        outputs = self.encoder(pixel_values=x)
-        return outputs.pooler_output
+        return self.encoder(x)
 
 def evaluate_knn(model, train_loader, val_loader, device):
     """ฟังก์ชันทดสอบความแม่นยำด้วย k-NN แบบรวดเร็ว (Accuracy-First)"""
@@ -110,7 +109,7 @@ def evaluate_knn(model, train_loader, val_loader, device):
     return (correct / total) * 100
 
 def main():
-    print("🌟 เริ่มกระบวนการ Stage 3: Feature Extraction (Accuracy-First Validation) 🌟")
+    print("🌟 เริ่มกระบวนการ Stage 3 (ทางเลือก): Feature Extraction ด้วย Swin Transformer 🌟")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"รันบนอุปกรณ์: {device}")
@@ -132,8 +131,8 @@ def main():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    train_dir = "Data200_Hybrid_Split/train"
-    val_dir = "Data200_Hybrid_Split/val"
+    train_dir = "Data200_Raw_Split/train"
+    val_dir = "Data200_Raw_Split/val"
     if not os.path.exists(train_dir) or not os.path.exists(val_dir):
         print(f"❌ ไม่พบโฟลเดอร์ข้อมูล {train_dir} หรือ {val_dir} กรุณารันไฟล์ 02 ก่อน")
         return
@@ -155,10 +154,10 @@ def main():
     # 3. Dataloader สำหรับโจทย์ข้อสอบย่อย
     val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, num_workers=8, pin_memory=True)
     
-    print("\n📥 กำลังโหลดโมเดล SOTA (facebook/dinov2-large)...")
-    model = HFVisionFinetuner().to(device)
+    print("\n📥 กำลังโหลดโมเดล SOTA ทางเลือก (Swin Transformer Large)...")
+    model = SwinVisionFinetuner().to(device)
     
-    weight_path = 'hybrid_hf_vision_finetuned.pth'
+    weight_path = 'hybrid_swin_vision_finetuned.pth'
     if os.path.exists(weight_path):
         print(f"🔄 พบไฟล์น้ำหนักเดิม '{weight_path}' โหลดต่อเพื่อสานความฉลาด...")
         model.encoder.load_state_dict(torch.load(weight_path, map_location=device))
@@ -206,7 +205,7 @@ def main():
             torch.save(model.encoder.state_dict(), weight_path)
             print(f"   🏆 New High Score! เซฟโมเดลเก็บไว้ที่ความแม่นยำ {val_acc:.2f}% ({weight_path})")
 
-    print(f"\n🎉 ฝึกสอนโมเดลสำเร็จ! (ความแม่นยำสูงสุดระหว่างเทรนที่เซฟไว้: {best_val_acc:.2f}%)")
+    print(f"\n🎉 ฝึกสอนโมเดล Swin Transformer สำเร็จ! (ความแม่นยำสูงสุดระหว่างเทรนที่เซฟไว้: {best_val_acc:.2f}%)")
 
 if __name__ == "__main__":
     main()
