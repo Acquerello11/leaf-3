@@ -43,9 +43,9 @@ class SupConLoss(nn.Module):
         return loss.mean()
 
 class HFVisionFinetuner(nn.Module):
-    def __init__(self, model_name='facebook/dinov2-large'):
+    def __init__(self, model_name='facebook/dinov2-large', **kwargs):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(model_name)
+        self.encoder = AutoModel.from_pretrained(model_name, **kwargs)
         
         # แช่แข็งพารามิเตอร์เกือบทั้งหมด
         for param in self.encoder.parameters():
@@ -134,8 +134,8 @@ def main():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    train_dir = "Data200_Raw_Split/train"
-    val_dir = "Data200_Raw_Split/val"
+    train_dir = "Data200_Segmented_Split/train"
+    val_dir = "Data200_Segmented_Split/val"
     if not os.path.exists(train_dir) or not os.path.exists(val_dir):
         print(f"❌ ไม่พบโฟลเดอร์ข้อมูล {train_dir} หรือ {val_dir} กรุณารันไฟล์ 02 ก่อน")
         return

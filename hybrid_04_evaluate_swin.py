@@ -99,8 +99,8 @@ class HybridEvaluatorSwin:
 def main():
     print("🌟 เข้าสู่โหมดประเมินประสิทธิภาพระบบ (System Evaluation - SwinV2 Engine) 🌟")
     
-    train_dir = "Data200_Raw_Split/train"
-    test_dir = "Data200_Raw_Split/test"
+    train_dir = "Data200_Segmented_Split/train"
+    test_dir = "Data200_Segmented_Split/test"
     weights_path = "hybrid_swin_vision_finetuned.pth"
     
     if not os.path.exists(train_dir) or not os.path.exists(test_dir):

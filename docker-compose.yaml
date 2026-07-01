@@ -1,0 +1,42 @@
+services:
+  # ==========================================
+  # Workspace สำหรับ User A
+  # ==========================================
+  trainer_user_a:
+    build: .
+    container_name: leaf_ai_user_a
+    volumes:
+      - ./workspace_a:/app
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'       # ขยายเป็น 4 Cores
+          memory: 20G       # ขยายเป็น 20GB
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    ipc: host
+    command: tail -f /dev/null
+
+  # ==========================================
+  # Workspace สำหรับ User B
+  # ==========================================
+  trainer_user_b:
+    build: .
+    container_name: leaf_ai_user_b
+    volumes:
+      - ./workspace_b:/app
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 20G
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    ipc: host
+    command: tail -f /dev/null

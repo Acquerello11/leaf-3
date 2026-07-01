@@ -42,7 +42,7 @@ class HybridEvaluator:
         dataset = datasets.ImageFolder(train_dir, transform=self.transform)
         self.classes = dataset.classes
         
-        dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4)
+        dataloader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=8)
         
         all_features = []
         all_labels = []
@@ -50,20 +50,21 @@ class HybridEvaluator:
         with torch.inference_mode():
             for inputs, labels in tqdm(dataloader, desc="สร้างคลังสมอง (Knowledge Base)"):
                 inputs = inputs.to(self.device)
-                features = self.model.get_features(inputs)
+                with torch.amp.autocast('cuda'):
+                    features = self.model.get_features(inputs)
                 features = F.normalize(features, dim=1) 
                 
                 all_features.append(features.cpu())
                 all_labels.append(labels)
                 
-        self.kb_features = torch.cat(all_features, dim=0)
-        self.kb_labels = torch.cat(all_labels, dim=0)
+        self.kb_features = torch.cat(all_features, dim=0).to(self.device)
+        self.kb_labels = torch.cat(all_labels, dim=0).to(self.device)
         print("✅ สร้างคลังสมองสำเร็จ พร้อมสำหรับการทำนาย!")
 
     def evaluate(self, test_dir):
         print("\n🔍 กำลังรันโมเดลทำนายผล (Evaluation) บนข้อมูล Test 15%...")
         dataset = datasets.ImageFolder(test_dir, transform=self.transform)
-        dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4)
+        dataloader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=8)
         
         true_labels = []
         predicted_labels = []
@@ -72,15 +73,16 @@ class HybridEvaluator:
             for inputs, labels in tqdm(dataloader, desc="ประเมินผล Test Set"):
                 inputs = inputs.to(self.device)
                 
-                test_features = self.model.get_features(inputs)
+                with torch.amp.autocast('cuda'):
+                    test_features = self.model.get_features(inputs)
                 test_features = F.normalize(test_features, dim=1)
                 
                 similarity_matrix = torch.matmul(test_features, self.kb_features.T)
                 best_match_indices = torch.argmax(similarity_matrix, dim=1)
-                pred_labels = self.kb_labels[best_match_indices.cpu()]
+                pred_labels = self.kb_labels[best_match_indices]
                 
                 true_labels.extend(labels.numpy())
-                predicted_labels.extend(pred_labels.numpy())
+                predicted_labels.extend(pred_labels.cpu().numpy())
                 
         true_names = [self.classes[i] for i in true_labels]
         pred_names = [self.classes[i] for i in predicted_labels]
@@ -90,8 +92,8 @@ class HybridEvaluator:
 def main():
     print("🌟 เข้าสู่โหมดประเมินประสิทธิภาพระบบ (System Evaluation - HF Engine) 🌟")
     
-    train_dir = "Data200_Raw_Split/train"
-    test_dir = "Data200_Raw_Split/test"
+    train_dir = "Data200_Segmented_Split/train"
+    test_dir = "Data200_Segmented_Split/test"
     weights_path = "hybrid_hf_vision_finetuned.pth"
     
     if not os.path.exists(weights_path) or not os.path.exists(train_dir) or not os.path.exists(test_dir):

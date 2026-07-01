@@ -11,24 +11,19 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import importlib.util
 
-spec = importlib.util.spec_from_file_location("hybrid3", "hybrid_03_finetune_dino.py")
-hybrid3 = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(hybrid3)
-HFVisionFinetuner = hybrid3.HFVisionFinetuner
+spec = importlib.util.spec_from_file_location("hybrid3_swin", "hybrid_03_finetune_swin.py")
+hybrid3_swin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hybrid3_swin)
+SwinVisionFinetuner = hybrid3_swin.SwinVisionFinetuner
 
 # ====================================================
-# 🟢 ตั้งค่า: ใส่พาธของรูปภาพที่คุณต้องการเทสตรงนี้ได้เลย!
-# ====================================================
-# ตัวอย่าง: "Data200_Rejected/outliers/ชื่อไฟล์.jpg"
-# ถ้าปล่อยเป็น "" ระบบจะสุ่มรูปจากโฟลเดอร์ Test ให้
 IMAGE_PATH_TO_TEST = "" 
 # ====================================================
 
 def get_prediction_knn(model, test_image_tensor, train_dir, device):
-    """ฟังก์ชันสร้างคลังสมองแบบย่อ เพื่อทำนายรูป 1 รูป"""
     print("\n🧠 กำลังโหลดคลังสมอง (Train Set) เพื่อนำมาทายผล...")
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -43,7 +38,8 @@ def get_prediction_knn(model, test_image_tensor, train_dir, device):
     with torch.inference_mode():
         for inputs, labels in tqdm(dataloader, desc="สร้างคลังสมองชั่วคราว"):
             inputs = inputs.to(device)
-            features = model.get_features(inputs)
+            with torch.amp.autocast('cuda'):
+                features = model.get_features(inputs)
             features = F.normalize(features, dim=1)
             train_features.append(features.cpu())
             train_labels.append(labels)
@@ -52,12 +48,13 @@ def get_prediction_knn(model, test_image_tensor, train_dir, device):
     train_labels = torch.cat(train_labels, dim=0)
     
     with torch.inference_mode():
-        test_feature = model.get_features(test_image_tensor)
+        with torch.amp.autocast('cuda'):
+            test_feature = model.get_features(test_image_tensor)
         test_feature = F.normalize(test_feature, dim=1).cpu()
         
         sim_matrix = torch.matmul(test_feature, train_features.T)
         best_match_idx = torch.argmax(sim_matrix, dim=1).item()
-        confidence = torch.max(sim_matrix).item() * 100 # Cosine Score
+        confidence = torch.max(sim_matrix).item() * 100
         
         pred_label_idx = train_labels[best_match_idx].item()
         pred_class_name = classes[pred_label_idx]
@@ -67,7 +64,7 @@ def get_prediction_knn(model, test_image_tensor, train_dir, device):
 def generate_attention_map(model, image_path, device):
     img = Image.open(image_path).convert('RGB')
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -75,18 +72,15 @@ def generate_attention_map(model, image_path, device):
     input_tensor = transform(img).unsqueeze(0).to(device)
     
     with torch.inference_mode():
-        outputs = model.encoder(pixel_values=input_tensor, output_attentions=True)
-        
-    attentions = outputs.attentions[-1]
-    cls_attention = attentions[0, :, 0, 1:]
-    mean_attention = torch.mean(cls_attention, dim=0).cpu().numpy()
+        with torch.amp.autocast('cuda'):
+            features = model.encoder.forward_features(input_tensor)
+            
+    spatial_feat = features[0].cpu().numpy()
+    attention_grid = np.linalg.norm(spatial_feat, axis=-1)
+    attention_grid = (attention_grid - attention_grid.min()) / (attention_grid.max() - attention_grid.min() + 1e-8)
+    attention_grid = cv2.resize(attention_grid, (256, 256))
     
-    grid_size = int(np.sqrt(mean_attention.shape[0]))
-    attention_grid = mean_attention.reshape(grid_size, grid_size)
-    attention_grid = (attention_grid - attention_grid.min()) / (attention_grid.max() - attention_grid.min())
-    attention_grid = cv2.resize(attention_grid, (224, 224))
-    
-    img_resized = np.array(img.resize((224, 224)))
+    img_resized = np.array(img.resize((256, 256)))
     heatmap = cv2.applyColorMap(np.uint8(255 * attention_grid), cv2.COLORMAP_JET)
     heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
     
@@ -96,23 +90,21 @@ def generate_attention_map(model, image_path, device):
     return input_tensor, img_resized, heatmap, superimposed
 
 def main():
-    print("🌟 โหมดตรวจสอบรูปภาพรายบุคคล (Single Image Tester & Attention) 🌟")
+    print("🌟 โหมดตรวจสอบรูปภาพรายบุคคล (Single Image Tester & Attention) - SwinV2 🌟")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights_path = "hybrid_hf_vision_finetuned.pth"
+    weights_path = "hybrid_swin_vision_finetuned.pth"
     train_dir = "Data200_Segmented_Split/train"
     
     if not os.path.exists(weights_path) or not os.path.exists(train_dir):
         print(f"❌ ไม่พบไฟล์น้ำหนัก {weights_path} หรือโฟลเดอร์ {train_dir}")
         return
         
-    print("📥 กำลังโหลดน้ำหนักโมเดล (HF Engine)...")
-    # ต้องเปิดโหมด eager เพื่อให้ DINOv2 คืนค่า attention map ออกมาได้
-    model = HFVisionFinetuner(attn_implementation="eager").to(device)
+    print("📥 กำลังโหลดน้ำหนักโมเดล (SwinV2 Engine)...")
+    model = SwinVisionFinetuner().to(device)
     model.encoder.load_state_dict(torch.load(weights_path, map_location=device))
     model.eval()
     
-    # ---------------- เลือกรูป ----------------
     target_path = IMAGE_PATH_TO_TEST
     
     if target_path == "":
@@ -132,15 +124,11 @@ def main():
         
     print(f"\n🔍 กำลังสแกนรูป: {target_path}")
     
-    # ---------------- 1. สแกนสมอง ----------------
     input_tensor, img_original, heatmap, superimposed = generate_attention_map(model, target_path, device)
-    
-    # ---------------- 2. ทายผล k-NN ----------------
     pred_class, confidence = get_prediction_knn(model, input_tensor, train_dir, device)
     
     print(f"\n🎯 คำทำนายของโมเดล: {pred_class} (ความคล้ายคลึง: {confidence:.2f}%)")
     
-    # ---------------- วาดกราฟ ----------------
     plt.figure(figsize=(15, 6))
     
     plt.subplot(1, 3, 1)
@@ -158,7 +146,7 @@ def main():
     plt.title(f'Predicted: {pred_class}\nConf: {confidence:.2f}%')
     plt.axis('off')
     
-    out_path = 'hybrid_attention_result.png'
+    out_path = 'hybrid_attention_result_swin.png'
     plt.tight_layout()
     plt.savefig(out_path)
     print(f"✅ บันทึกภาพผลลัพธ์ไว้ที่: '{out_path}' เรียบร้อยแล้ว!")
